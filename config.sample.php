@@ -7,7 +7,9 @@ $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ||
 $host = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : (isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : 'localhost');
 
 $baseDir = rtrim(dirname($_SERVER['SCRIPT_NAME']), '/\\');
-define('APP_URL', $protocol . $host . $baseDir);
+if (!defined('APP_URL')) {
+    define('APP_URL', $protocol . $host . $baseDir);
+}
 
 
 $_app_stage = 'Live'; # Do not change this

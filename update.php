@@ -6,9 +6,18 @@
  * This script is for updating PHPNuxBill
  **/
 session_start();
-include "config.php";
+require_once __DIR__ . "/system/EnvironmentConfiguration.php";
+try {
+    $environmentConfiguration = EnvironmentConfiguration::bootstrap(__DIR__ . "/config.php");
+} catch (InvalidArgumentException $error) {
+    http_response_code(500);
+    exit('Application configuration error: ' . htmlspecialchars($error->getMessage(), ENT_QUOTES, 'UTF-8'));
+}
 
-if($db_password != null && ($db_pass == null || empty($db_pass))){
+if (!in_array('DB_PASSWORD', $environmentConfiguration['overrides'], true)
+    && isset($db_password)
+    && $db_password != null
+    && (!isset($db_pass) || $db_pass == null || empty($db_pass))) {
     // compability for old version
     $db_pass = $db_password;
 }
@@ -105,7 +114,7 @@ if (empty($step)) {
 } else if ($step == 4) {
     if (file_exists("system/updates.json")) {
         $db = new pdo(
-            "mysql:host=$db_host;dbname=$db_name",
+            EnvironmentConfiguration::mysqlDsn($db_host, $db_name, $environmentConfiguration['database_dsn_port']),
             $db_user,
             $db_pass,
             array(PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION)
