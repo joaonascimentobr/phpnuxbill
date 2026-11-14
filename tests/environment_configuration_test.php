@@ -1,33 +1,44 @@
 <?php
 
+declare(strict_types=1);
+
 require_once __DIR__ . '/../system/EnvironmentConfiguration.php';
 
 if (($argv[1] ?? '') === '--bootstrap-probe') {
     $scenario = $argv[2] ?? '';
     if ($scenario === 'legacy') {
-        $configuration = EnvironmentConfiguration::bootstrap(__DIR__ . '/fixtures/legacy-config.php', []);
+        $configuration = EnvironmentConfiguration::bootstrap(
+            __DIR__ . '/fixtures/legacy-config.php',
+            EnvironmentVariables::fromEnvironment([])
+        );
     } elseif ($scenario === 'mixed') {
-        $configuration = EnvironmentConfiguration::bootstrap(__DIR__ . '/fixtures/legacy-config.php', [
-            'APP_URL' => 'https://override.example.invalid',
-            'APP_ENV' => 'development',
-            'DB_PASSWORD' => '',
-            'DB_PORT' => '3307',
-        ]);
+        $configuration = EnvironmentConfiguration::bootstrap(
+            __DIR__ . '/fixtures/legacy-config.php',
+            EnvironmentVariables::fromEnvironment([
+                'APP_URL' => 'https://override.example.invalid',
+                'APP_ENV' => 'development',
+                'DB_PASSWORD' => '',
+                'DB_PORT' => '3307',
+            ])
+        );
     } elseif ($scenario === 'environment') {
-        $configuration = EnvironmentConfiguration::bootstrap(__DIR__ . '/fixtures/missing-' . getmypid() . '.php', [
-            'APP_URL' => 'https://env.example.invalid',
-            'DB_HOST' => 'environment-db',
-            'DB_NAME' => 'environment-database',
-            'DB_USER' => 'environment-user',
-            'DB_PASSWORD' => 'probe-secret',
-        ]);
+        $configuration = EnvironmentConfiguration::bootstrap(
+            __DIR__ . '/fixtures/missing-' . getmypid() . '.php',
+            EnvironmentVariables::fromEnvironment([
+                'APP_URL' => 'https://env.example.invalid',
+                'DB_HOST' => 'environment-db',
+                'DB_NAME' => 'environment-database',
+                'DB_USER' => 'environment-user',
+                'DB_PASSWORD' => 'probe-secret',
+            ])
+        );
     } else {
         fwrite(STDERR, 'Unknown bootstrap test scenario.' . PHP_EOL);
         exit(2);
     }
 
     echo json_encode([
-        'mode' => $configuration['mode'],
+        'mode' => $configuration->mode->value,
         'url' => APP_URL,
         'stage' => $_app_stage,
         'host' => $db_host,
@@ -35,7 +46,7 @@ if (($argv[1] ?? '') === '--bootstrap-probe') {
         'user' => $db_user,
         'password_is_empty' => $db_pass === '',
         'password_is_environment_value' => $db_pass === 'probe-secret',
-        'port' => $configuration['database_dsn_port'],
+        'port' => $configuration->databaseDsnPort,
         'display_errors' => ini_get('display_errors'),
         'radius_host' => $radius_host ?? null,
     ], JSON_THROW_ON_ERROR);
@@ -44,7 +55,7 @@ if (($argv[1] ?? '') === '--bootstrap-probe') {
 
 $passed = 0;
 
-function checkSame($expected, $actual, string $message): void
+function checkSame(mixed $expected, mixed $actual, string $message): void
 {
     global $passed;
     if ($expected !== $actual) {
@@ -56,6 +67,14 @@ function checkSame($expected, $actual, string $message): void
 function checkTrue(bool $actual, string $message): void
 {
     checkSame(true, $actual, $message);
+}
+
+/**
+ * @param array<string, mixed> $values External environment fixture input.
+ */
+function testEnvironment(array $values): EnvironmentVariables
+{
+    return EnvironmentVariables::fromEnvironment($values);
 }
 
 function expectConfigurationError(callable $callback, string $messageFragment): string
@@ -74,6 +93,9 @@ function expectConfigurationError(callable $callback, string $messageFragment): 
     throw new RuntimeException('Expected an environment configuration error.');
 }
 
+/**
+ * @return array<string, mixed>
+ */
 function runBootstrapProbe(string $scenario): array
 {
     $descriptors = [
@@ -97,6 +119,9 @@ function runBootstrapProbe(string $scenario): array
     }
 
     $result = json_decode($stdout, true, 512, JSON_THROW_ON_ERROR);
+    if (!is_array($result)) {
+        throw new RuntimeException('Bootstrap probe returned an invalid result structure.');
+    }
     return $result;
 }
 
@@ -139,99 +164,120 @@ $traditional = [
 ];
 
 // Traditional config-only installation keeps all legacy values and DSN behavior.
-$resolved = EnvironmentConfiguration::resolve($traditional, [], true);
-checkSame('config', $resolved['mode'], 'Config-only mode should be detected.');
-checkSame($traditional, $resolved['globals'], 'Config-only values, including optional RADIUS settings, should be unchanged.');
-checkSame(null, $resolved['database_dsn_port'], 'Config-only mode should not change the legacy DSN when DB_PORT is absent.');
+$resolved = EnvironmentConfiguration::resolve($traditional, testEnvironment([]), true);
+checkSame(EnvironmentConfigurationMode::CONFIG, $resolved->mode, 'Config-only mode should be detected.');
+checkSame($traditional, $resolved->globals, 'Config-only values, including optional RADIUS settings, should be unchanged.');
+checkSame(null, $resolved->databaseDsnPort, 'Config-only mode should not change the legacy DSN when DB_PORT is absent.');
 
 // Complete ENV-only configuration works without config.php and defaults the port.
-$environmentOnly = [
+$environmentOnlyValues = [
     'APP_URL' => 'https://isp.example.invalid',
     'DB_HOST' => 'mariadb',
     'DB_NAME' => 'phpnuxbill',
     'DB_USER' => 'phpnuxbill',
     'DB_PASSWORD' => 'secret-for-test-only',
 ];
+$environmentOnly = testEnvironment($environmentOnlyValues);
 $resolved = EnvironmentConfiguration::resolve([], $environmentOnly, false);
-checkSame('environment', $resolved['mode'], 'Missing config.php should select ENV-only mode.');
-checkSame('https://isp.example.invalid', $resolved['globals']['APP_URL'], 'ENV-only APP_URL should be loaded.');
-checkSame('mariadb', $resolved['globals']['db_host'], 'ENV-only DB_HOST should be loaded.');
-checkSame('secret-for-test-only', $resolved['globals']['db_pass'], 'ENV-only DB_PASSWORD should map to db_pass.');
-checkSame('Live', $resolved['globals']['_app_stage'], 'APP_ENV should default to production in ENV-only mode.');
-checkSame('3306', $resolved['globals']['db_port'], 'ENV-only DB_PORT should default to 3306.');
-checkSame(3306, $resolved['database_dsn_port'], 'The default ENV-only port should be used by PDO/ORM DSNs.');
+checkSame(EnvironmentConfigurationMode::ENVIRONMENT, $resolved->mode, 'Missing config.php should select ENV-only mode.');
+checkSame('https://isp.example.invalid', $resolved->globals['APP_URL'], 'ENV-only APP_URL should be loaded.');
+checkSame('mariadb', $resolved->globals['db_host'], 'ENV-only DB_HOST should be loaded.');
+checkSame('secret-for-test-only', $resolved->globals['db_pass'], 'ENV-only DB_PASSWORD should map to db_pass.');
+checkSame('Live', $resolved->globals['_app_stage'], 'APP_ENV should default to production in ENV-only mode.');
+checkSame('3306', $resolved->globals['db_port'], 'ENV-only DB_PORT should default to 3306.');
+checkSame(3306, $resolved->databaseDsnPort, 'The default ENV-only port should be used by PDO/ORM DSNs.');
 
 // Only present variables override config.php; unset values retain legacy values.
-$resolved = EnvironmentConfiguration::resolve($traditional, [
+$resolved = EnvironmentConfiguration::resolve($traditional, testEnvironment([
     'DB_HOST' => 'override-db',
     'DB_PASSWORD' => 'override-password',
-], true);
-checkSame('override-db', $resolved['globals']['db_host'], 'Present DB_HOST should override the config file.');
-checkSame('legacy_database', $resolved['globals']['db_name'], 'Unset DB_NAME should fall back to config.php.');
-checkSame('override-password', $resolved['globals']['db_pass'], 'Present DB_PASSWORD should override the config file.');
-checkSame('radius-db', $resolved['globals']['radius_host'], 'Environment overrides must preserve optional RADIUS settings.');
-checkSame(null, $resolved['database_dsn_port'], 'Unset DB_PORT should keep the original connection behavior.');
+]), true);
+checkSame('override-db', $resolved->globals['db_host'], 'Present DB_HOST should override the config file.');
+checkSame('legacy_database', $resolved->globals['db_name'], 'Unset DB_NAME should fall back to config.php.');
+checkSame('override-password', $resolved->globals['db_pass'], 'Present DB_PASSWORD should override the config file.');
+checkSame('radius-db', $resolved->globals['radius_host'], 'Environment overrides must preserve optional RADIUS settings.');
+checkSame(null, $resolved->databaseDsnPort, 'Unset DB_PORT should keep the original connection behavior.');
 
 // An explicitly empty password overrides the legacy password rather than falling back.
-$resolved = EnvironmentConfiguration::resolve($traditional, ['DB_PASSWORD' => ''], true);
-checkSame('', $resolved['globals']['db_pass'], 'An explicitly empty DB_PASSWORD must remain empty.');
-checkSame('', $resolved['globals']['db_password'], 'The legacy password alias must also remain explicitly empty.');
-checkSame('legacy-password', EnvironmentConfiguration::resolve($traditional, [], true)['globals']['db_pass'], 'An absent DB_PASSWORD should preserve the legacy password.');
+$resolved = EnvironmentConfiguration::resolve($traditional, testEnvironment(['DB_PASSWORD' => '']), true);
+checkSame('', $resolved->globals['db_pass'], 'An explicitly empty DB_PASSWORD must remain empty.');
+checkSame('', $resolved->globals['db_password'], 'The legacy password alias must also remain explicitly empty.');
+checkSame('legacy-password', EnvironmentConfiguration::resolve($traditional, testEnvironment([]), true)->globals['db_pass'], 'An absent DB_PASSWORD should preserve the legacy password.');
+
+// Legacy connection values accept strings and null, but reject other types.
+$nullableLegacy = $traditional;
+$nullableLegacy['db_host'] = null;
+$resolved = EnvironmentConfiguration::resolve($nullableLegacy, testEnvironment([]), true);
+checkSame(null, $resolved->globals['db_host'], 'A null legacy DB_HOST should remain null.');
+
+foreach ([false, 3306] as $invalidLegacyValue) {
+    $invalidLegacy = $traditional;
+    $invalidLegacy['db_host'] = $invalidLegacyValue;
+    expectConfigurationError(
+        static function () use ($invalidLegacy): void {
+            EnvironmentConfiguration::resolve($invalidLegacy, testEnvironment([]), true);
+        },
+        'db_host'
+    );
+}
 
 // ENV-only mode rejects absent required variables and invalid values without echoing secrets.
 $message = expectConfigurationError(
-    static function () {
-        EnvironmentConfiguration::resolve([], ['APP_URL' => 'https://isp.example.invalid'], false);
+    static function (): void {
+        EnvironmentConfiguration::resolve([], testEnvironment(['APP_URL' => 'https://isp.example.invalid']), false);
     },
     'DB_HOST'
 );
 checkTrue(strpos($message, 'secret-for-test-only') === false, 'Missing-variable errors must not reveal credential values.');
 
-$badUrlEnvironment = $environmentOnly;
-$badUrlEnvironment['APP_URL'] = 'not-a-url';
+$badUrlEnvironment = testEnvironment(array_merge($environmentOnlyValues, ['APP_URL' => 'not-a-url']));
 $message = expectConfigurationError(
-    static function () use ($badUrlEnvironment) {
+    static function () use ($badUrlEnvironment): void {
         EnvironmentConfiguration::resolve([], $badUrlEnvironment, false);
     },
     'APP_URL'
 );
 checkTrue(strpos($message, 'secret-for-test-only') === false, 'URL validation errors must not reveal credentials.');
 
-$badAppEnvironment = $environmentOnly;
-$badAppEnvironment['APP_ENV'] = 'staging';
+$badAppEnvironment = testEnvironment(array_merge($environmentOnlyValues, ['APP_ENV' => 'staging']));
 expectConfigurationError(
-    static function () use ($badAppEnvironment) {
+    static function () use ($badAppEnvironment): void {
         EnvironmentConfiguration::resolve([], $badAppEnvironment, false);
     },
     'APP_ENV'
 );
 
-$badPortEnvironment = $environmentOnly;
-$badPortEnvironment['DB_PORT'] = '65536';
+$badPortEnvironment = testEnvironment(array_merge($environmentOnlyValues, ['DB_PORT' => '65536']));
 expectConfigurationError(
-    static function () use ($badPortEnvironment) {
+    static function () use ($badPortEnvironment): void {
         EnvironmentConfiguration::resolve([], $badPortEnvironment, false);
     },
     'DB_PORT'
 );
 
 expectConfigurationError(
-    static function () use ($traditional) {
-        EnvironmentConfiguration::resolve($traditional, ['APP_URL' => ''], true);
+    static function (): void {
+        EnvironmentVariables::fromEnvironment(['DB_PORT' => 3306]);
+    },
+    'DB_PORT'
+);
+
+expectConfigurationError(
+    static function () use ($traditional): void {
+        EnvironmentConfiguration::resolve($traditional, testEnvironment(['APP_URL' => '']), true);
     },
     'APP_URL'
 );
 expectConfigurationError(
-    static function () use ($traditional) {
-        EnvironmentConfiguration::resolve($traditional, ['DB_PORT' => ''], true);
+    static function () use ($traditional): void {
+        EnvironmentConfiguration::resolve($traditional, testEnvironment(['DB_PORT' => '']), true);
     },
     'DB_PORT'
 );
 expectConfigurationError(
-    static function () use ($environmentOnly) {
-        $environment = $environmentOnly;
-        $environment['DB_PORT'] = 'mysql';
-        EnvironmentConfiguration::resolve([], $environment, false);
+    static function () use ($environmentOnlyValues): void {
+        $environment = array_merge($environmentOnlyValues, ['DB_PORT' => 'mysql']);
+        EnvironmentConfiguration::resolve([], testEnvironment($environment), false);
     },
     'DB_PORT'
 );
@@ -245,6 +291,11 @@ checkSame(
     'mysql:host=mariadb;dbname=phpnuxbill',
     EnvironmentConfiguration::mysqlDsn('mariadb', 'phpnuxbill'),
     'The legacy DSN should remain unchanged when no environment port applies.'
+);
+checkSame(
+    'mysql:host=;dbname=',
+    EnvironmentConfiguration::mysqlDsn(null, null),
+    'Null legacy connection values should retain their previous empty-string DSN behavior.'
 );
 
 // HTTP and cron entry points share init.php, which delegates to the same loader.

@@ -1,134 +1,108 @@
 <?php
 
+declare(strict_types=1);
+
+require_once __DIR__ . '/EnvironmentVariables.php';
+require_once __DIR__ . '/EnvironmentConfigurationMode.php';
+require_once __DIR__ . '/ResolvedEnvironmentConfiguration.php';
+require_once __DIR__ . '/EnvironmentConfigurationStatus.php';
+
 /**
  * Resolve application configuration from environment variables and the legacy
  * config.php file. Environment variables always take precedence when present.
  */
 final class EnvironmentConfiguration
 {
-    private const ENVIRONMENT_VARIABLES = [
-        'APP_URL',
-        'APP_ENV',
-        'DB_HOST',
-        'DB_PORT',
-        'DB_NAME',
-        'DB_USER',
-        'DB_PASSWORD',
-    ];
-
-    private const REQUIRED_ENVIRONMENT_VARIABLES = [
-        'APP_URL',
-        'DB_HOST',
-        'DB_NAME',
-        'DB_USER',
-        'DB_PASSWORD',
-    ];
-
     /**
-     * Return only supported variables that are actually present.
-     * An empty string remains present and is validated separately.
+     * Read supported process variables or convert a provided environment boundary.
+     *
+     * @param array<string, mixed>|null $environment Optional input used by tests.
      */
-    public static function readEnvironment(?array $environment = null): array
+    public static function readEnvironment(?array $environment = null): EnvironmentVariables
     {
-        $values = [];
-
-        foreach (self::ENVIRONMENT_VARIABLES as $name) {
-            if ($environment !== null) {
-                if (array_key_exists($name, $environment)) {
-                    $values[$name] = (string) $environment[$name];
-                }
-                continue;
-            }
-
-            $value = getenv($name);
-            if ($value !== false) {
-                $values[$name] = $value;
-            }
-        }
-
-        return $values;
+        return EnvironmentVariables::fromEnvironment($environment);
     }
 
-    public static function hasRequiredEnvironment(array $environment): bool
+    public static function hasRequiredEnvironment(EnvironmentVariables $environment): bool
     {
-        foreach (self::REQUIRED_ENVIRONMENT_VARIABLES as $name) {
-            if (!array_key_exists($name, $environment)) {
-                return false;
-            }
-        }
-
-        return true;
+        return $environment->hasRequiredEnvironment();
     }
 
     /**
      * Resolve without loading files or connecting to a database. Kept pure so
      * configuration behavior can be tested without application infrastructure.
+     *
+     * @param array<string, mixed> $legacy Dynamic values captured from config.php.
      */
-    public static function resolve(array $legacy, array $environment, bool $configExists): array
+    public static function resolve(array $legacy, EnvironmentVariables $environment, bool $configExists): ResolvedEnvironmentConfiguration
     {
-        $environment = self::readEnvironment($environment);
         $environmentOnly = !$configExists;
         self::validateEnvironment($environment, $environmentOnly);
 
         $globals = $legacy;
 
-        $appUrl = self::value($environment, 'APP_URL', $legacy, 'APP_URL');
+        $appUrl = self::value($environment->appUrl, $legacy, 'APP_URL');
         if ($appUrl !== null) {
             $globals['APP_URL'] = $appUrl;
         }
 
-        if (array_key_exists('APP_ENV', $environment)) {
-            $globals['_app_stage'] = strtolower(trim($environment['APP_ENV'])) === 'production' ? 'Live' : 'Dev';
+        if ($environment->appEnv !== null) {
+            $globals['_app_stage'] = strtolower(trim($environment->appEnv)) === 'production' ? 'Live' : 'Dev';
         } elseif ($environmentOnly) {
             $globals['_app_stage'] = 'Live';
         }
 
-        $databaseMappings = [
-            'DB_HOST' => 'db_host',
-            'DB_NAME' => 'db_name',
-            'DB_USER' => 'db_user',
-        ];
-        foreach ($databaseMappings as $environmentName => $legacyName) {
-            $value = self::value($environment, $environmentName, $legacy, $legacyName);
-            if ($value !== null) {
-                $globals[$legacyName] = $value;
-            }
+        $dbHost = self::value($environment->dbHost, $legacy, 'db_host');
+        if ($dbHost !== null) {
+            $globals['db_host'] = $dbHost;
+        }
+        $dbName = self::value($environment->dbName, $legacy, 'db_name');
+        if ($dbName !== null) {
+            $globals['db_name'] = $dbName;
+        }
+        $dbUser = self::value($environment->dbUser, $legacy, 'db_user');
+        if ($dbUser !== null) {
+            $globals['db_user'] = $dbUser;
         }
 
-        if (array_key_exists('DB_PASSWORD', $environment)) {
+        if ($environment->dbPassword !== null) {
             // Set both names used by current and older integrations. Empty is
             // intentional here and must not fall back to config.php.
-            $globals['db_pass'] = $environment['DB_PASSWORD'];
-            $globals['db_password'] = $environment['DB_PASSWORD'];
+            $globals['db_pass'] = $environment->dbPassword;
+            $globals['db_password'] = $environment->dbPassword;
         }
 
         $databaseDsnPort = null;
-        if (array_key_exists('DB_PORT', $environment)) {
-            $databaseDsnPort = self::validatePort($environment['DB_PORT']);
+        if ($environment->dbPort !== null) {
+            $databaseDsnPort = self::validatePort($environment->dbPort);
             $globals['db_port'] = (string) $databaseDsnPort;
         } elseif ($environmentOnly) {
             $databaseDsnPort = 3306;
             $globals['db_port'] = '3306';
         }
 
-        $mode = $environmentOnly ? 'environment' : (empty($environment) ? 'config' : 'mixed');
+        $mode = $environmentOnly
+            ? EnvironmentConfigurationMode::ENVIRONMENT
+            : ($environment->hasAny() ? EnvironmentConfigurationMode::MIXED : EnvironmentConfigurationMode::CONFIG);
 
-        return [
-            'globals' => $globals,
-            'mode' => $mode,
-            'overrides' => array_keys($environment),
-            'database_dsn_port' => $databaseDsnPort,
-            'apply_error_display_policy' => array_key_exists('APP_ENV', $environment) || $environmentOnly,
-        ];
+        return new ResolvedEnvironmentConfiguration(
+            globals: $globals,
+            mode: $mode,
+            overrides: $environment->presentVariableNames(),
+            databaseDsnPort: $databaseDsnPort,
+            applyErrorDisplayPolicy: $environment->appEnv !== null || $environmentOnly
+        );
     }
 
     /**
      * Load legacy config.php in an isolated scope, then publish resolved values
      * into the global scope expected by the application.
+     *
+     * @return EnvironmentConfigurationStatus Metadata without resolved credentials.
      */
-    public static function bootstrap(string $configPath, ?array $environment = null): array
+    public static function bootstrap(string $configPath, ?EnvironmentVariables $environment = null): EnvironmentConfigurationStatus
     {
-        $environment = self::readEnvironment($environment);
+        $environment ??= self::readEnvironment();
         $configExists = is_file($configPath);
 
         if (!$configExists && !self::hasRequiredEnvironment($environment)) {
@@ -137,12 +111,12 @@ final class EnvironmentConfiguration
         self::validateEnvironment($environment, !$configExists);
 
         $appUrlWasPredefined = false;
-        if (array_key_exists('APP_URL', $environment)) {
-            if (defined('APP_URL') && constant('APP_URL') !== trim($environment['APP_URL'])) {
+        if ($environment->appUrl !== null) {
+            if (defined('APP_URL') && constant('APP_URL') !== trim($environment->appUrl)) {
                 throw new InvalidArgumentException('APP_URL was defined before environment configuration was loaded.');
             }
             if (!defined('APP_URL')) {
-                define('APP_URL', trim($environment['APP_URL']));
+                define('APP_URL', trim($environment->appUrl));
                 $appUrlWasPredefined = true;
             }
         }
@@ -156,40 +130,43 @@ final class EnvironmentConfiguration
         }
 
         $resolved = self::resolve($legacy, $environment, $configExists);
-        foreach ($resolved['globals'] as $name => $value) {
+        foreach ($resolved->globals as $name => $value) {
             $GLOBALS[$name] = $value;
         }
 
-        if ($resolved['apply_error_display_policy']) {
-            self::applyErrorDisplayPolicy($resolved['globals']['_app_stage'] ?? 'Live');
+        if ($resolved->applyErrorDisplayPolicy) {
+            self::applyErrorDisplayPolicy($resolved->globals['_app_stage'] ?? 'Live');
         }
 
-        if (isset($resolved['globals']['APP_URL']) && !defined('APP_URL')) {
-            define('APP_URL', $resolved['globals']['APP_URL']);
+        if (isset($resolved->globals['APP_URL']) && !defined('APP_URL')) {
+            define('APP_URL', $resolved->globals['APP_URL']);
         }
 
         unset($GLOBALS['APP_URL']);
-        return [
-            'mode' => $resolved['mode'],
-            'overrides' => $resolved['overrides'],
-            'database_dsn_port' => $resolved['database_dsn_port'],
-        ];
+        return new EnvironmentConfigurationStatus(
+            mode: $resolved->mode,
+            overrides: $resolved->overrides,
+            databaseDsnPort: $resolved->databaseDsnPort
+        );
     }
 
-    public static function mysqlDsn(string $host, string $database, ?int $port = null): string
+    public static function mysqlDsn(?string $host, ?string $database, ?int $port = null): string
     {
-        $dsn = 'mysql:host=' . $host;
+        $dsn = 'mysql:host=' . ($host ?? '');
         if ($port !== null) {
             $dsn .= ';port=' . $port;
         }
 
-        return $dsn . ';dbname=' . $database;
+        return $dsn . ';dbname=' . ($database ?? '');
     }
 
+    /**
+     * @return array<string, mixed>
+     */
     private static function includeLegacyConfiguration(string $configPath, bool $appUrlWasPredefined): array
     {
         if ($appUrlWasPredefined) {
-            set_error_handler(static function ($severity, $message) {
+            set_error_handler(static function (int $severity, string $message): bool {
                 if (($severity & E_WARNING) && strpos($message, 'Constant APP_URL already defined') !== false) {
                     return true;
                 }
@@ -198,7 +175,7 @@ final class EnvironmentConfiguration
         }
 
         try {
-            return (static function ($file) {
+            return (static function (string $file): array {
                 require $file;
                 $variables = get_defined_vars();
                 unset($variables['file']);
@@ -211,72 +188,58 @@ final class EnvironmentConfiguration
         }
     }
 
-    private static function value(array $environment, string $environmentName, array $legacy, string $legacyName)
+    /**
+     * @param array<string, mixed> $legacy
+     * @return string|null
+     */
+    private static function value(?string $environmentValue, array $legacy, string $legacyName): ?string
     {
-        if (array_key_exists($environmentName, $environment)) {
-            return self::normalizeEnvironmentValue($environmentName, $environment[$environmentName]);
+        if ($environmentValue !== null) {
+            return trim($environmentValue);
         }
 
-        return array_key_exists($legacyName, $legacy) ? $legacy[$legacyName] : null;
+        if (!array_key_exists($legacyName, $legacy) || $legacy[$legacyName] === null) {
+            return null;
+        }
+
+        if (!is_string($legacy[$legacyName])) {
+            throw new InvalidArgumentException($legacyName . ' in config.php must be a string or null.');
+        }
+
+        return $legacy[$legacyName];
     }
 
-    private static function normalizeEnvironmentValue(string $name, string $value): string
-    {
-        return $name === 'DB_PASSWORD' ? $value : trim($value);
-    }
-
-    private static function validateEnvironment(array $environment, bool $environmentOnly): void
+    private static function validateEnvironment(EnvironmentVariables $environment, bool $environmentOnly): void
     {
         if ($environmentOnly) {
-            $missing = [];
-            foreach (self::REQUIRED_ENVIRONMENT_VARIABLES as $name) {
-                if (!array_key_exists($name, $environment)) {
-                    $missing[] = $name;
-                }
-            }
+            $missing = $environment->missingRequiredVariables();
             if ($missing) {
                 throw new InvalidArgumentException('Missing required environment variables: ' . implode(', ', $missing) . '.');
             }
         }
 
-        foreach ($environment as $name => $value) {
-            switch ($name) {
-                case 'APP_URL':
-                    self::validateApplicationUrl($value);
-                    break;
-                case 'APP_ENV':
-                    $environmentName = strtolower(trim($value));
-                    if (!in_array($environmentName, ['production', 'development'], true)) {
-                        throw new InvalidArgumentException('APP_ENV must be production or development.');
-                    }
-                    break;
-                case 'DB_HOST':
-                    self::validateDsnPart($name, $value);
-                    break;
-                case 'DB_NAME':
-                    self::validateDsnPart($name, $value);
-                    break;
-                case 'DB_USER':
-                    if (trim($value) === '') {
-                        throw new InvalidArgumentException('DB_USER must not be empty.');
-                    }
-                    break;
-                case 'DB_PORT':
-                    self::validatePort($value);
-                    break;
-                case 'DB_PASSWORD':
-                    // Empty passwords are allowed when explicitly configured.
-                    break;
+        if ($environment->appUrl !== null) {
+            self::validateApplicationUrl($environment->appUrl);
+        }
+        if ($environment->appEnv !== null) {
+            $appEnv = strtolower(trim($environment->appEnv));
+            if (!in_array($appEnv, ['production', 'development'], true)) {
+                throw new InvalidArgumentException('APP_ENV must be production or development.');
             }
         }
-
-        if ($environmentOnly) {
-            foreach (['DB_HOST', 'DB_NAME', 'DB_USER'] as $name) {
-                if (trim($environment[$name]) === '') {
-                    throw new InvalidArgumentException($name . ' must not be empty.');
-                }
-            }
+        if ($environment->dbHost !== null) {
+            self::validateDsnPart('DB_HOST', $environment->dbHost);
         }
+        if ($environment->dbName !== null) {
+            self::validateDsnPart('DB_NAME', $environment->dbName);
+        }
+        if ($environment->dbUser !== null && trim($environment->dbUser) === '') {
+            throw new InvalidArgumentException('DB_USER must not be empty.');
+        }
+        if ($environment->dbPort !== null) {
+            self::validatePort($environment->dbPort);
+        }
+        // Empty DB_PASSWORD remains valid for passwordless database accounts.
     }
 
     private static function validateApplicationUrl(string $value): void

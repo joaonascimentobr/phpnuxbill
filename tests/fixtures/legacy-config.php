@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 define('APP_URL', 'https://legacy.example.invalid/billing');
 $_app_stage = 'Live';
 $db_host = 'legacy-db';

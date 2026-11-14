@@ -90,7 +90,7 @@ require_once $root_path . File::pathFixer('system/orm.php');
 require_once $root_path . File::pathFixer('system/autoload/PEAR2/Autoload.php');
 include $root_path . File::pathFixer('system/autoload/Hookers.php');
 
-if (!in_array('DB_PASSWORD', $environmentConfiguration['overrides'], true)
+if (!in_array('DB_PASSWORD', $environmentConfiguration->overrides, true)
     && isset($db_password)
     && $db_password != null
     && (!isset($db_pass) || $db_pass == null || empty($db_pass))) {
@@ -101,7 +101,7 @@ if (isset($db_pass) && $db_pass != null) {
     // compability for old version
     $db_password = $db_pass;
 }
-ORM::configure(EnvironmentConfiguration::mysqlDsn($db_host, $db_name, $environmentConfiguration['database_dsn_port']));
+ORM::configure(EnvironmentConfiguration::mysqlDsn($db_host, $db_name, $environmentConfiguration->databaseDsnPort));
 ORM::configure('username', $db_user);
 ORM::configure('password', $db_pass);
 ORM::configure('return_result_sets', true);
