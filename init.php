@@ -39,9 +39,17 @@ function _autoloader($class)
 }
 spl_autoload_register('_autoloader');
 
-if (!file_exists($root_path . 'config.php')) {
-    $root_path .= '..' . DIRECTORY_SEPARATOR;
-    if (!file_exists($root_path . 'config.php')) {
+require_once $root_path . File::pathFixer('system/EnvironmentConfiguration.php');
+$environmentVariables = EnvironmentConfiguration::readEnvironment();
+$configurationFile = $root_path . 'config.php';
+
+if (!file_exists($configurationFile)) {
+    $parentRootPath = $root_path . '..' . DIRECTORY_SEPARATOR;
+    if (file_exists($parentRootPath . 'config.php')) {
+        $root_path = $parentRootPath;
+        $configurationFile = $root_path . 'config.php';
+    } elseif (!EnvironmentConfiguration::hasRequiredEnvironment($environmentVariables) && PHP_SAPI !== 'cli') {
+        $root_path = $parentRootPath;
         r2('./install');
     }
 }
@@ -65,20 +73,35 @@ if (!file_exists($UPLOAD_PATH . File::pathFixer('/notifications.default.json')))
     die();
 }
 
-require_once $root_path . 'config.php';
+try {
+    $environmentConfiguration = EnvironmentConfiguration::bootstrap($configurationFile, $environmentVariables);
+} catch (InvalidArgumentException $error) {
+    $message = 'Application configuration error: ' . $error->getMessage();
+    if (PHP_SAPI === 'cli') {
+        fwrite(STDERR, $message . PHP_EOL);
+    } else {
+        http_response_code(500);
+        header('Content-Type: text/plain; charset=utf-8');
+        echo $message;
+    }
+    exit(1);
+}
 require_once $root_path . File::pathFixer('system/orm.php');
 require_once $root_path . File::pathFixer('system/autoload/PEAR2/Autoload.php');
 include $root_path . File::pathFixer('system/autoload/Hookers.php');
 
-if ($db_password != null && ($db_pass == null || empty($db_pass))) {
+if (!in_array('DB_PASSWORD', $environmentConfiguration->overrides, true)
+    && isset($db_password)
+    && $db_password != null
+    && (!isset($db_pass) || $db_pass == null || empty($db_pass))) {
     // compability for old version
     $db_pass = $db_password;
 }
-if ($db_pass != null) {
+if (isset($db_pass) && $db_pass != null) {
     // compability for old version
     $db_password = $db_pass;
 }
-ORM::configure("mysql:host=$db_host;dbname=$db_name");
+ORM::configure(EnvironmentConfiguration::mysqlDsn($db_host, $db_name, $environmentConfiguration->databaseDsnPort));
 ORM::configure('username', $db_user);
 ORM::configure('password', $db_pass);
 ORM::configure('return_result_sets', true);

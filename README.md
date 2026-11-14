@@ -56,6 +56,8 @@ The problem with windows is hard to set cronjob, better Linux
 
 [Installation instructions](https://github.com/hotspotbilling/phpnuxbill/wiki)
 
+For Docker and environment-variable configuration, see [Environment Configuration](docs/environment-configuration.md).
+
 ## Freeradius
 
 Support [Freeradius with Database](https://github.com/hotspotbilling/phpnuxbill/wiki/FreeRadius)
